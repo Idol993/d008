@@ -1,0 +1,138 @@
+{
+  "drill_id": 1,
+  "drill_name": "功能验证演练",
+  "drill_type": "test",
+  "insurance_types": [
+    "auto",
+    "critical_illness"
+  ],
+  "policy_types": [
+    "individual",
+    "group"
+  ],
+  "simulated_version": "v2.0.0-test",
+  "target_version": "v1.0.0-STABLE",
+  "plan_details": {
+    "drill_id": 1,
+    "drill_name": "功能验证演练",
+    "drill_type": "test",
+    "phases": [
+      {
+        "phase": "准备阶段",
+        "order": 1,
+        "duration_minutes": 10,
+        "tasks": [
+          "确认演练参与人员",
+          "检查演练环境状态",
+          "备份当前系统配置",
+          "准备演练用例数据"
+        ]
+      },
+      {
+        "phase": "执行阶段",
+        "order": 2,
+        "duration_minutes": 30,
+        "tasks": [
+          "模拟触发回滚条件",
+          "执行版本回滚操作",
+          "验证回滚后系统状态",
+          "检查保单数据一致性"
+        ]
+      },
+      {
+        "phase": "验证阶段",
+        "order": 3,
+        "duration_minutes": 20,
+        "tasks": [
+          "核保功能验证",
+          "理赔功能验证",
+          "客户信息安全检查",
+          "监管合规性检查"
+        ]
+      },
+      {
+        "phase": "恢复阶段",
+        "order": 4,
+        "duration_minutes": 10,
+        "tasks": [
+          "恢复演练前状态",
+          "清理演练数据",
+          "确认系统正常运行"
+        ]
+      }
+    ],
+    "insurance_scope": [
+      "auto",
+      "critical_illness"
+    ],
+    "policy_scope": [
+      "individual",
+      "group"
+    ],
+    "simulated_version": "v2.0.0-test",
+    "target_version": "v1.0.0-STABLE",
+    "estimated_total_minutes": 70,
+    "participants": [
+      "核保组",
+      "理赔组",
+      "合规组",
+      "技术组"
+    ]
+  },
+  "policy_validation_result": {
+    "total_policies_checked": 959,
+    "passed_policies": 955,
+    "failed_policies": 4,
+    "by_insurance_type": {
+      "auto": {
+        "name": "车险",
+        "total": 461,
+        "passed": 459,
+        "failed": 2,
+        "pass_rate": 0.9957
+      },
+      "critical_illness": {
+        "name": "重疾险",
+        "total": 498,
+        "passed": 496,
+        "failed": 2,
+        "pass_rate": 0.996
+      }
+    },
+    "failed_policy_samples": [
+      {
+        "policy_id": "POL937839",
+        "insurance_type": "auto",
+        "issue": "保单状态不一致"
+      },
+      {
+        "policy_id": "POL586069",
+        "insurance_type": "auto",
+        "issue": "核保结论错误"
+      },
+      {
+        "policy_id": "POL150315",
+        "insurance_type": "critical_illness",
+        "issue": "保单状态不一致"
+      },
+      {
+        "policy_id": "POL273516",
+        "insurance_type": "critical_illness",
+        "issue": "保单状态不一致"
+      }
+    ],
+    "validation_details": [
+      "保单数据完整性校验",
+      "保费计算准确性校验",
+      "核保结论一致性校验",
+      "理赔条件适配性校验",
+      "客户信息脱敏验证"
+    ],
+    "overall_pass_rate": 0.9958
+  },
+  "start_time": "2026-06-19 07:46:28",
+  "end_time": "2026-06-19 07:46:28",
+  "operator": "test_user",
+  "archived_at": "2026-06-19 07:46:28",
+  "regulatory_reference": "符合银保监会《保险信息系统安全管理指引》演练要求"
+}
