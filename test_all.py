@@ -91,13 +91,32 @@ print()
 print('[5/11] 测试灰度发布模块...')
 try:
     from grayscale_manager import GrayscaleManager
-    result = GrayscaleManager.start_grayscale(release_id)
-    print(f'  ✓ 灰度发布启动: {result["message"]}')
+    from models import get_session, ReleaseRequest
+    session = get_session()
+    try:
+        rel = session.query(ReleaseRequest).filter_by(id=release_id).first()
+        current_status = rel.status
+    finally:
+        session.close()
+
+    if current_status in ('grayscaling', 'fully_released'):
+        print(f'  ✓ 灰度发布已在审批通过时自动启动 (当前状态: {current_status})')
+    else:
+        result = GrayscaleManager.start_grayscale(release_id)
+        print(f'  ✓ 灰度发布启动: {result["message"]}')
 
     status = GrayscaleManager.get_grayscale_status(release_id)
     print(f'  ✓ 当前灰度状态: {status["overall_status"]}')
     print(f'    险种: {status["current_insurance_type_name"]}')
     print(f'    阶段: {status["current_stage"]}')
+    if status.get('grayscale_details'):
+        for it, stages in status['grayscale_details'].items():
+            import config
+            it_name = config.INSURANCE_TYPE_NAMES.get(it, it)
+            running = [s for s in stages if s['status'] == 'running']
+            if running:
+                s = running[0]
+                print(f'    {it_name} 第{s["stage"]}阶段: {s["percentage"]*100:.0f}% (影响{s["affected_policies_count"]}份)')
 except Exception as e:
     print(f'  ✗ 失败: {e}')
     all_passed = False

@@ -80,45 +80,50 @@
     ]
   },
   "policy_validation_result": {
-    "total_policies_checked": 959,
-    "passed_policies": 955,
-    "failed_policies": 4,
+    "total_policies_checked": 352,
+    "passed_policies": 345,
+    "failed_policies": 7,
     "by_insurance_type": {
       "auto": {
         "name": "车险",
-        "total": 461,
-        "passed": 459,
+        "total": 189,
+        "passed": 187,
         "failed": 2,
-        "pass_rate": 0.9957
+        "pass_rate": 0.9894
       },
       "critical_illness": {
         "name": "重疾险",
-        "total": 498,
-        "passed": 496,
-        "failed": 2,
-        "pass_rate": 0.996
+        "total": 163,
+        "passed": 158,
+        "failed": 5,
+        "pass_rate": 0.9693
       }
     },
     "failed_policy_samples": [
       {
-        "policy_id": "POL937839",
+        "policy_id": "POL843113",
         "insurance_type": "auto",
-        "issue": "保单状态不一致"
+        "issue": "保费计算异常"
       },
       {
-        "policy_id": "POL586069",
+        "policy_id": "POL368559",
         "insurance_type": "auto",
-        "issue": "核保结论错误"
+        "issue": "保费计算异常"
       },
       {
-        "policy_id": "POL150315",
+        "policy_id": "POL165215",
+        "insurance_type": "critical_illness",
+        "issue": "保费计算异常"
+      },
+      {
+        "policy_id": "POL658089",
         "insurance_type": "critical_illness",
         "issue": "保单状态不一致"
       },
       {
-        "policy_id": "POL273516",
+        "policy_id": "POL956316",
         "insurance_type": "critical_illness",
-        "issue": "保单状态不一致"
+        "issue": "受益人信息缺失"
       }
     ],
     "validation_details": [
@@ -128,11 +133,11 @@
       "理赔条件适配性校验",
       "客户信息脱敏验证"
     ],
-    "overall_pass_rate": 0.9958
+    "overall_pass_rate": 0.9801
   },
-  "start_time": "2026-06-19 07:46:28",
-  "end_time": "2026-06-19 07:46:28",
+  "start_time": "2026-06-19 08:08:35",
+  "end_time": "2026-06-19 08:08:35",
   "operator": "test_user",
-  "archived_at": "2026-06-19 07:46:28",
+  "archived_at": "2026-06-19 08:08:35",
   "regulatory_reference": "符合银保监会《保险信息系统安全管理指引》演练要求"
 }

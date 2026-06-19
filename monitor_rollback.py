@@ -9,20 +9,43 @@ import random
 
 class MonitorManager:
     @staticmethod
-    def collect_metrics(release_id):
+    def collect_metrics(release_id, force_stable=False):
         session = get_session()
         try:
             release = session.query(ReleaseRequest).filter_by(id=release_id).first()
             if not release:
                 raise ValueError(f'发布申请不存在: {release_id}')
 
-            insurance_type = release.current_insurance_type or release.insurance_types[0]
-            stage = release.current_grayscale_stage or 0
+            is_rolled_back = (release.status == 'rolled_back')
 
-            underwriting_pass_rate = MonitorManager._simulate_underwriting_pass_rate(release, insurance_type)
-            claim_process_delay = MonitorManager._simulate_claim_delay(release, insurance_type)
-            claim_abnormal_rate = MonitorManager._simulate_claim_abnormal_rate(release, insurance_type)
-            info_leak_risk = MonitorManager._simulate_info_leak_risk(release, insurance_type)
+            if is_rolled_back:
+                stable_version = session.query(StableVersion).filter_by(
+                    id=release.stable_version_id
+                ).first() if release.stable_version_id else None
+                if not stable_version:
+                    stable_version = session.query(StableVersion).filter_by(
+                        is_active=True, regulatory_approved=True
+                    ).order_by(StableVersion.created_at.desc()).first()
+                version_label = f'STABLE:{stable_version.version}' if stable_version else 'STABLE'
+                stage = -1
+            else:
+                version_label = release.version
+                stage = release.current_grayscale_stage or 0
+
+            insurance_type = release.current_insurance_type or release.insurance_types[0]
+
+            underwriting_pass_rate = MonitorManager._simulate_underwriting_pass_rate(
+                release, insurance_type, is_rolled_back
+            )
+            claim_process_delay = MonitorManager._simulate_claim_delay(
+                release, insurance_type, is_rolled_back
+            )
+            claim_abnormal_rate = MonitorManager._simulate_claim_abnormal_rate(
+                release, insurance_type, is_rolled_back
+            )
+            info_leak_risk = MonitorManager._simulate_info_leak_risk(
+                release, insurance_type, is_rolled_back
+            )
 
             threshold_details = MonitorManager._check_thresholds(
                 underwriting_pass_rate, claim_process_delay,
@@ -31,6 +54,8 @@ class MonitorManager:
             threshold_exceeded = any(
                 detail['exceeded'] for detail in threshold_details.values()
             )
+
+            monitor_desc = f'[回滚稳定版监控-{version_label}]' if is_rolled_back else ''
 
             record = MonitorRecord(
                 release_request_id=release_id,
@@ -44,18 +69,23 @@ class MonitorManager:
                 threshold_details=threshold_details
             )
             session.add(record)
-            session.commit()
+            session.flush()
             record_id = record.id
 
-            if threshold_exceeded:
+            if threshold_exceeded and not is_rolled_back:
                 log_monitor_alert(release_id, 'threshold_exceeded',
-                                  f'{insurance_type} 阶段{stage} 指标超出阈值')
+                                  f'{insurance_type} 阶段{stage} 指标超出阈值 {monitor_desc}',
+                                  session=session)
+
+            session.commit()
 
             return {
                 'record_id': record_id,
                 'release_id': release_id,
                 'insurance_type': insurance_type,
                 'stage': stage,
+                'is_rolled_back_monitoring': is_rolled_back,
+                'version_label': version_label,
                 'underwriting_pass_rate': underwriting_pass_rate,
                 'claim_process_delay_seconds': claim_process_delay,
                 'claim_abnormal_rate': claim_abnormal_rate,
@@ -70,51 +100,64 @@ class MonitorManager:
             session.close()
 
     @staticmethod
-    def _simulate_underwriting_pass_rate(release, insurance_type):
+    def _simulate_underwriting_pass_rate(release, insurance_type, is_stable=False):
         base_rate = {
             'auto': 0.92,
             'life': 0.88,
             'critical_illness': 0.85
         }
         base = base_rate.get(insurance_type, 0.90)
-        variance = random.uniform(-0.08, 0.03)
-        if release.status == 'grayscaling' and release.current_grayscale_stage < 2:
-            variance += random.uniform(-0.02, 0.01)
-        return round(max(0.70, min(0.99, base + variance)), 4)
+        if is_stable:
+            variance = random.uniform(-0.02, 0.02)
+        else:
+            variance = random.uniform(-0.08, 0.03)
+            if release.status == 'grayscaling' and (release.current_grayscale_stage or 0) < 2:
+                variance += random.uniform(-0.02, 0.01)
+        return round(max(0.82, min(0.97, base + variance)), 4)
 
     @staticmethod
-    def _simulate_claim_delay(release, insurance_type):
+    def _simulate_claim_delay(release, insurance_type, is_stable=False):
         base_delay = {
             'auto': 1800,
             'life': 2400,
             'critical_illness': 3000
         }
         base = base_delay.get(insurance_type, 2000)
-        variance = random.uniform(-300, 800)
-        if release.status == 'grayscaling':
-            variance += random.uniform(0, 500)
-        return round(max(600, base + variance), 0)
+        if is_stable:
+            variance = random.uniform(-200, 200)
+        else:
+            variance = random.uniform(-300, 800)
+            if release.status == 'grayscaling':
+                variance += random.uniform(0, 500)
+        return round(max(900, min(3200, base + variance)), 0)
 
     @staticmethod
-    def _simulate_claim_abnormal_rate(release, insurance_type):
+    def _simulate_claim_abnormal_rate(release, insurance_type, is_stable=False):
         base_rate = {
             'auto': 0.02,
             'life': 0.015,
             'critical_illness': 0.025
         }
         base = base_rate.get(insurance_type, 0.02)
-        variance = random.uniform(-0.01, 0.03)
-        if release.status == 'grayscaling' and release.current_grayscale_stage < 1:
-            variance += random.uniform(0, 0.02)
-        return round(max(0.001, min(0.10, base + variance)), 4)
+        if is_stable:
+            variance = random.uniform(-0.005, 0.005)
+        else:
+            variance = random.uniform(-0.01, 0.03)
+            if release.status == 'grayscaling' and (release.current_grayscale_stage or 0) < 1:
+                variance += random.uniform(0, 0.02)
+        return round(max(0.001, min(0.04, base + variance)), 4)
 
     @staticmethod
-    def _simulate_info_leak_risk(release, insurance_type):
-        base_risk = 0.002
-        variance = random.uniform(-0.001, 0.005)
-        if release.status == 'grayscaling' and release.current_grayscale_stage == 0:
-            variance += random.uniform(0, 0.003)
-        return round(max(0.0001, min(0.02, base_risk + variance)), 5)
+    def _simulate_info_leak_risk(release, insurance_type, is_stable=False):
+        if is_stable:
+            base_risk = 0.001
+            variance = random.uniform(-0.0005, 0.0005)
+        else:
+            base_risk = 0.002
+            variance = random.uniform(-0.001, 0.005)
+            if release.status == 'grayscaling' and (release.current_grayscale_stage or 0) == 0:
+                variance += random.uniform(0, 0.003)
+        return round(max(0.0001, min(0.008, base_risk + variance)), 5)
 
     @staticmethod
     def _check_thresholds(pass_rate, delay, abnormal_rate, leak_risk):

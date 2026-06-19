@@ -91,26 +91,32 @@ class InsuranceReleaseSystem:
         try:
             from models import ReleaseRequest
             active_releases = session.query(ReleaseRequest).filter(
-                ReleaseRequest.status.in_(['grayscaling', 'fully_released'])
+                ReleaseRequest.status.in_(['grayscaling', 'fully_released', 'rolled_back'])
             ).all()
 
             for release in active_releases:
-                if release.rollback_triggered:
-                    continue
+                is_rolled_back = (release.status == 'rolled_back')
 
                 metrics = MonitorManager.collect_metrics(release.id)
-                print(f'[监控] 发布 {release.id} ({release.version}): '
+                tag = '[稳定版]' if is_rolled_back else ''
+                version_show = metrics.get('version_label', release.version)
+
+                print(f'[监控{tag}] 发布 {release.id} ({version_show}): '
                       f'通过率={metrics["underwriting_pass_rate"]:.2%}, '
                       f'理赔延迟={metrics["claim_process_delay_seconds"]:.0f}s, '
                       f'异常率={metrics["claim_abnormal_rate"]:.2%}, '
                       f'泄露风险={metrics["info_leak_risk"]:.4%}, '
                       f'超阈值={"是" if metrics["threshold_exceeded"] else "否"}')
 
-                if metrics['threshold_exceeded']:
+                if metrics['threshold_exceeded'] and not is_rolled_back:
                     print(f'[告警] 发布 {release.id} 指标超出阈值，触发合规回滚!')
                     self._trigger_auto_rollback(release.id, metrics)
+                elif is_rolled_back:
+                    print(f'  └─ 稳定版持续监控中，未触发回滚保护机制')
         except Exception as e:
             print(f'[监控] 任务执行异常: {e}')
+            import traceback
+            traceback.print_exc()
         finally:
             session.close()
 
@@ -183,8 +189,13 @@ class InsuranceReleaseSystem:
     def approve_release(self, release_id, role, approver, comment='', passed=True):
         result = ApprovalManager.approve(release_id, role, approver, comment, passed)
 
-        if result.get('status') == 'approved':
-            GrayscaleManager.start_grayscale(release_id)
+        if result.get('status') == 'approved' and not result.get('grayscale_started'):
+            try:
+                GrayscaleManager.start_grayscale(release_id)
+                result['grayscale_started'] = True
+                result['fallback_grayscale'] = True
+            except Exception as e:
+                result['grayscale_error'] = str(e)
 
         return result
 
@@ -260,26 +271,49 @@ def run_demo():
 
         print('[演示] 2. 自动审批通过所有环节')
         from approval_manager import ApprovalManager
-        ApprovalManager.batch_auto_approve(result1['release_id'], 'demo_system')
+        auto_result = ApprovalManager.batch_auto_approve(result1['release_id'], 'demo_system')
+        print(f'  审批状态: {auto_result["status"]}')
+        print(f'  灰度启动: {"成功" if auto_result.get("grayscale_started") else "失败"}')
+        if auto_result.get('grayscale_result'):
+            gr = auto_result['grayscale_result']
+            print(f'  灰度详情:')
+            print(f'    - 当前险种: {gr.get("insurance_type_name")}')
+            print(f'    - 当前阶段: 第{gr.get("stage", 0)}阶段')
+            print(f'    - 推送比例: {gr.get("percentage", 0)*100:.0f}%')
+            print(f'    - 影响保单: {gr.get("affected_policies", 0)}份')
         approval_status = ApprovalManager.get_approval_status(result1['release_id'])
-        print(f'  当前状态: {approval_status["overall_status"]}')
+        print(f'  总体状态: {approval_status["overall_status"]}')
         for appr in approval_status['approvals']:
-            print(f'    - {appr["role_name"]}: {appr["status"]}')
+            icon = '✓' if appr['status'] == 'approved' else '○'
+            print(f'    {icon} {appr["role_name"]}: {appr["status"]}')
         print()
 
         print('[演示] 3. 查看灰度发布状态')
         from grayscale_manager import GrayscaleManager
         gray_status = GrayscaleManager.get_grayscale_status(result1['release_id'])
         print(f'  整体状态: {gray_status["overall_status"]}')
-        print(f'  当前险种: {gray_status["current_insurance_type_name"]}')
-        print(f'  当前阶段: {gray_status["current_stage"]}')
+        if gray_status['overall_status'] == 'grayscaling':
+            print(f'  当前险种: {gray_status["current_insurance_type_name"]}')
+            print(f'  当前阶段: 第{gray_status["current_stage"]}阶段')
+            for it, stages in gray_status['grayscale_details'].items():
+                it_name = config.INSURANCE_TYPE_NAMES.get(it, it)
+                print(f'  {it_name} 灰度明细:')
+                for s in stages:
+                    icon_map = {'running': '▶', 'completed': '✓', 'pending': '○', 'rolled_back': '⏹'}
+                    icon = icon_map.get(s['status'], s['status'])
+                    print(f'    {icon} 阶段{s["stage"]}: {s["percentage"]*100:.0f}% - {s["status"]} (影响{s["affected_policies_count"]}份)')
+        else:
+            print(f'  (状态说明: 当前状态为{gray_status["overall_status"]})')
         print()
 
         print('[演示] 4. 模拟多次监控数据采集')
         from monitor_rollback import MonitorManager
         for i in range(3):
             metrics = MonitorManager.collect_metrics(result1['release_id'])
-            print(f'  第{i+1}次监控: 通过率={metrics["underwriting_pass_rate"]:.2%}, '
+            tag = '[稳定版]' if metrics.get('is_rolled_back_monitoring') else ''
+            print(f'  第{i+1}次监控{tag}: 通过率={metrics["underwriting_pass_rate"]:.2%}, '
+                  f'延迟={metrics["claim_process_delay_seconds"]:.0f}s, '
+                  f'异常率={metrics["claim_abnormal_rate"]:.2%}, '
                   f'超阈值={"是" if metrics["threshold_exceeded"] else "否"}')
         print()
 
@@ -328,6 +362,23 @@ def run_demo():
         print(f'  从版本: {rollback_result["from_version"]}')
         print(f'  回滚至: {rollback_result["to_version"]}')
         print(f'  影响保单: {rollback_result["affected_policies"]} 份')
+        print()
+
+        print('[演示] 8.5 回滚后继续稳定版监控 (3次)')
+        for i in range(3):
+            metrics = MonitorManager.collect_metrics(result1['release_id'])
+            tag = '[稳定版监控]' if metrics.get('is_rolled_back_monitoring') else ''
+            print(f'  稳定版第{i+1}次{tag}:')
+            print(f'    - 版本标签: {metrics.get("version_label")}')
+            print(f'    - 核保通过率: {metrics["underwriting_pass_rate"]:.2%}')
+            print(f'    - 理赔处理延迟: {metrics["claim_process_delay_seconds"]:.0f}秒')
+            print(f'    - 赔付异常率: {metrics["claim_abnormal_rate"]:.2%}')
+            print(f'    - 信息泄露风险: {metrics["info_leak_risk"]:.4%}')
+            print(f'    - 指标超阈值: {"是" if metrics["threshold_exceeded"] else "否"} (稳定版不触发回滚)')
+        history = MonitorManager.get_monitor_history(result1['release_id'], limit=100)
+        stable_count = sum(1 for m in history if m.get('grayscale_stage') == -1)
+        normal_count = len(history) - stable_count
+        print(f'  该发布累计监控记录: {len(history)}条 (正常版:{normal_count}条, 稳定版:{stable_count}条)')
         print()
 
         print('[演示] 9. 查询审计日志 (监管相关)')

@@ -4,6 +4,14 @@ from audit_logger import log_approval, AuditLogger
 import config
 
 
+def _start_grayscale_for_approved_release(release_id):
+    try:
+        from grayscale_manager import GrayscaleManager
+        return GrayscaleManager.start_grayscale(release_id)
+    except Exception as e:
+        return {'error': str(e), 'message': f'灰度启动失败: {e}'}
+
+
 class ApprovalManager:
     @staticmethod
     def generate_approval_workflow(risk_level):
@@ -41,6 +49,8 @@ class ApprovalManager:
                 )
                 session.add(record)
 
+            release.status = 'pending_approval'
+            release.updated_at = datetime.now()
             session.commit()
 
             AuditLogger.log(
@@ -74,6 +84,37 @@ class ApprovalManager:
             if not release:
                 raise ValueError(f'发布申请不存在: {release_id}')
 
+            workflow = ApprovalManager.generate_approval_workflow(release.risk_level)
+
+            if role not in workflow:
+                return {
+                    'release_id': release_id,
+                    'status': 'blocked',
+                    'blocked_reason': f'审批失败: {config.APPROVAL_ROLE_NAMES.get(role, role)}不在审批流程中',
+                    'workflow': [config.APPROVAL_ROLE_NAMES.get(r, r) for r in workflow],
+                    'message': f'审批被拦截: {role}不在审批流程中'
+                }
+
+            current_role_index = workflow.index(role)
+            for i in range(current_role_index):
+                prev_role = workflow[i]
+                prev_approval = session.query(ApprovalRecord).filter_by(
+                    release_request_id=release_id,
+                    role=prev_role
+                ).first()
+                if not prev_approval or prev_approval.status != 'approved':
+                    prev_role_name = config.APPROVAL_ROLE_NAMES.get(prev_role, prev_role)
+                    cur_role_name = config.APPROVAL_ROLE_NAMES.get(role, role)
+                    return {
+                        'release_id': release_id,
+                        'status': 'blocked',
+                        'blocked_reason': f'审批顺序异常: {prev_role_name}尚未通过, 不能执行{cur_role_name}审批',
+                        'expected_next_role': prev_role_name,
+                        'attempted_role': cur_role_name,
+                        'workflow_status': ApprovalManager._get_workflow_status(session, release_id, workflow),
+                        'message': f'审批被拦截: 请先完成{prev_role_name}审批'
+                    }
+
             approval = session.query(ApprovalRecord).filter_by(
                 release_request_id=release_id,
                 role=role,
@@ -81,39 +122,49 @@ class ApprovalManager:
             ).first()
 
             if not approval:
-                pending = session.query(ApprovalRecord).filter_by(
+                existing = session.query(ApprovalRecord).filter_by(
                     release_request_id=release_id,
                     role=role
                 ).first()
-                if pending:
-                    raise ValueError(f'{role}审批已处理')
+                if existing:
+                    role_name = config.APPROVAL_ROLE_NAMES.get(role, role)
+                    return {
+                        'release_id': release_id,
+                        'status': 'blocked',
+                        'blocked_reason': f'{role_name}审批已处理, 状态={existing.status}',
+                        'message': f'审批被拦截: {role_name}已处理过'
+                    }
                 else:
-                    raise ValueError(f'{role}不在审批流程中')
+                    role_name = config.APPROVAL_ROLE_NAMES.get(role, role)
+                    return {
+                        'release_id': release_id,
+                        'status': 'blocked',
+                        'blocked_reason': f'{role_name}审批记录不存在',
+                        'message': f'审批被拦截: {role_name}记录不存在'
+                    }
 
             approval.status = 'approved' if passed else 'rejected'
             approval.comment = comment
             approval.approve_time = datetime.now()
 
-            log_approval(release_id, role, approver, approval.status, comment)
+            log_approval(release_id, role, approver, approval.status, comment, session=session)
 
             if not passed:
                 release.status = 'rejected'
                 release.updated_at = datetime.now()
                 session.commit()
+                role_name = config.APPROVAL_ROLE_NAMES.get(role, role)
                 return {
                     'release_id': release_id,
                     'status': 'rejected',
                     'rejected_by': role,
-                    'message': '审批被驳回'
+                    'rejected_by_name': role_name,
+                    'message': f'{role_name}审批被驳回'
                 }
 
-            workflow = ApprovalManager.generate_approval_workflow(release.risk_level)
-            current_index = workflow.index(role) if role in workflow else -1
-
-            if current_index == len(workflow) - 1:
+            if current_role_index == len(workflow) - 1:
                 release.status = 'approved'
                 release.updated_at = datetime.now()
-                session.commit()
 
                 AuditLogger.log(
                     operation_type='all_approved',
@@ -123,23 +174,25 @@ class ApprovalManager:
                     related_id=release_id,
                     related_type='release_request',
                     regulatory_related=True,
-                    risk_level='high'
+                    risk_level='high',
+                    session=session
                 )
+
+                session.commit()
+
+                grayscale_result = _start_grayscale_for_approved_release(release_id)
 
                 return {
                     'release_id': release_id,
                     'status': 'approved',
-                    'message': '所有审批通过，可以开始灰度发布'
+                    'grayscale_started': 'error' not in grayscale_result,
+                    'grayscale_result': grayscale_result,
+                    'message': '所有审批通过，已自动启动灰度发布'
                 }
 
-            next_role = workflow[current_index + 1]
-            next_approval = session.query(ApprovalRecord).filter_by(
-                release_request_id=release_id,
-                role=next_role
-            ).first()
-
-            if next_approval and next_approval.status == 'pending':
-                pass
+            next_role = workflow[current_role_index + 1]
+            next_role_name = config.APPROVAL_ROLE_NAMES.get(next_role, next_role)
+            cur_role_name = config.APPROVAL_ROLE_NAMES.get(role, role)
 
             release.updated_at = datetime.now()
             session.commit()
@@ -148,14 +201,33 @@ class ApprovalManager:
                 'release_id': release_id,
                 'status': 'approving',
                 'current_approved_role': role,
+                'current_approved_role_name': cur_role_name,
                 'next_role': next_role,
-                'message': f'{role}审批通过，等待{next_role}审批'
+                'next_role_name': next_role_name,
+                'workflow_status': ApprovalManager._get_workflow_status(session, release_id, workflow),
+                'message': f'{cur_role_name}审批通过，等待{next_role_name}审批'
             }
         except Exception as e:
             session.rollback()
             raise e
         finally:
             session.close()
+
+    @staticmethod
+    def _get_workflow_status(session, release_id, workflow):
+        result = []
+        for role in workflow:
+            approval = session.query(ApprovalRecord).filter_by(
+                release_request_id=release_id,
+                role=role
+            ).first()
+            result.append({
+                'role': role,
+                'role_name': config.APPROVAL_ROLE_NAMES.get(role, role),
+                'status': approval.status if approval else 'not_initialized',
+                'approver': approval.approver if approval else None
+            })
+        return result
 
     @staticmethod
     def get_approval_status(release_id):
@@ -242,7 +314,19 @@ class ApprovalManager:
 
             workflow = ApprovalManager.generate_approval_workflow(release.risk_level)
 
-            for role in workflow:
+            for idx, role in enumerate(workflow):
+                for prev_idx in range(idx):
+                    prev_role = workflow[prev_idx]
+                    prev_approval = session.query(ApprovalRecord).filter_by(
+                        release_request_id=release_id,
+                        role=prev_role
+                    ).first()
+                    if prev_approval:
+                        prev_approval.status = 'approved'
+                        prev_approval.approver = f'{operator}_auto'
+                        prev_approval.comment = '系统自动审批通过'
+                        prev_approval.approve_time = datetime.now()
+
                 approval = session.query(ApprovalRecord).filter_by(
                     release_request_id=release_id,
                     role=role,
@@ -254,26 +338,47 @@ class ApprovalManager:
                     approval.comment = '系统自动审批通过'
                     approval.approve_time = datetime.now()
 
+                    log_approval(release_id, role, f'{operator}_auto', 'approved',
+                                 '系统自动审批通过', session=session)
+
             release.status = 'approved'
             release.updated_at = datetime.now()
-            session.commit()
 
             AuditLogger.log(
                 operation_type='auto_approve',
                 operation_module='compliance',
                 operator=operator,
-                operation_detail=f'自动审批通过所有环节',
+                operation_detail=f'自动审批通过所有环节: {",".join(workflow)}',
                 related_id=release_id,
                 related_type='release_request',
                 regulatory_related=True,
-                risk_level='high'
+                risk_level='high',
+                session=session
             )
+
+            AuditLogger.log(
+                operation_type='all_approved',
+                operation_module='compliance',
+                operator=operator,
+                operation_detail='所有审批通过(自动)，发布审批流程完成',
+                related_id=release_id,
+                related_type='release_request',
+                regulatory_related=True,
+                risk_level='high',
+                session=session
+            )
+
+            session.commit()
+
+            grayscale_result = _start_grayscale_for_approved_release(release_id)
 
             return {
                 'release_id': release_id,
                 'status': 'approved',
                 'workflow': workflow,
-                'message': '自动审批通过'
+                'grayscale_started': 'error' not in grayscale_result,
+                'grayscale_result': grayscale_result,
+                'message': '自动审批通过，已自动启动灰度发布'
             }
         except Exception as e:
             session.rollback()
